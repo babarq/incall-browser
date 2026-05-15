@@ -3,29 +3,319 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>InCall</title>
+    <title>WebRTC Video Stream + Data Channel</title>
     <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+
         body {
-            margin: 0;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            background: #1a1a2e;
+            color: #eee;
             display: flex;
-            justify-content: center;
+            flex-direction: column;
             align-items: center;
+            padding: 30px 20px;
             min-height: 100vh;
-            background: #000;
-            font-family: -apple-system, BlinkMacSystemFont, sans-serif;
         }
-        h1 {
+
+        h1 { margin-bottom: 24px; font-size: 1.6rem; color: #a78bfa; }
+
+        .video-container {
+            display: flex;
+            gap: 20px;
+            flex-wrap: wrap;
+            justify-content: center;
+            margin-bottom: 24px;
+        }
+
+        .video-box {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 8px;
+        }
+
+        video {
+            width: 360px;
+            height: 270px;
+            background: #000;
+            border-radius: 12px;
+            border: 2px solid #4c1d95;
+            object-fit: cover;
+        }
+
+        label {
+            font-size: 0.85rem;
+            color: #a78bfa;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+
+        .controls {
+            display: flex;
+            gap: 12px;
+            margin-bottom: 24px;
+            flex-wrap: wrap;
+            justify-content: center;
+        }
+
+        button {
+            padding: 10px 22px;
+            border: none;
+            border-radius: 8px;
+            font-size: 0.95rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        #startBtn   { background: #7c3aed; color: #fff; }
+        #startBtn:hover   { background: #6d28d9; }
+        #connectBtn { background: #059669; color: #fff; }
+        #connectBtn:hover { background: #047857; }
+        #hangupBtn  { background: #dc2626; color: #fff; }
+        #hangupBtn:hover  { background: #b91c1c; }
+        button:disabled   { opacity: 0.4; cursor: not-allowed; }
+
+        .chat-section {
+            width: 100%;
+            max-width: 740px;
+            background: #16213e;
+            border-radius: 12px;
+            padding: 16px;
+            border: 1px solid #2d2d5e;
+        }
+
+        .chat-section h2 { font-size: 1rem; color: #a78bfa; margin-bottom: 12px; }
+
+        #messages {
+            height: 160px;
+            overflow-y: auto;
+            background: #0f0f23;
+            border-radius: 8px;
+            padding: 10px;
+            font-size: 0.85rem;
+            margin-bottom: 10px;
+            border: 1px solid #2d2d5e;
+        }
+
+        .msg { padding: 3px 0; border-bottom: 1px solid #1e1e3f; }
+        .msg.system { color: #6ee7b7; font-style: italic; }
+        .msg.sent   { color: #93c5fd; }
+        .msg.recv   { color: #fca5a5; }
+
+        .input-row {
+            display: flex;
+            gap: 8px;
+        }
+
+        #msgInput {
+            flex: 1;
+            padding: 8px 12px;
+            border-radius: 8px;
+            border: 1px solid #4c1d95;
+            background: #0f0f23;
+            color: #eee;
+            font-size: 0.9rem;
+        }
+
+        #sendBtn {
+            background: #7c3aed;
             color: #fff;
-            font-size: 48px;
-            font-weight: 700;
-            letter-spacing: -1px;
+            padding: 8px 18px;
+            border-radius: 8px;
+        }
+
+        #status {
+            font-size: 0.8rem;
+            color: #6ee7b7;
+            margin-bottom: 16px;
+            min-height: 18px;
         }
     </style>
 </head>
 <body>
-    <h1 id="message">HelloWorld</h1>
-    <script>
-        // Injected JavaScript from InCallBrowserView will run after this page loads
-    </script>
+
+<h1>🎥 WebRTC Video + Data Channel</h1>
+<div id="status">Idle — click "Start Camera" to begin</div>
+
+<div class="video-container">
+    <div class="video-box">
+        <label>Local</label>
+        <video id="localVideo" autoplay muted playsinline></video>
+    </div>
+    <div class="video-box">
+        <label>Remote</label>
+        <video id="remoteVideo" autoplay playsinline></video>
+    </div>
+</div>
+
+<div class="controls">
+    <button id="startBtn">📷 Start Camera</button>
+    <button id="connectBtn" disabled>🔗 Connect (Loopback)</button>
+    <button id="hangupBtn" disabled>📵 Hang Up</button>
+</div>
+
+<!-- Data Channel Chat -->
+<div class="chat-section">
+    <h2>💬 Data Channel Messages</h2>
+    <div id="messages"></div>
+    <div class="input-row">
+        <input id="msgInput" type="text" placeholder="Type a message..." disabled />
+        <button id="sendBtn" disabled>Send</button>
+    </div>
+</div>
+
+<script>
+// ─── State ────────────────────────────────────────────────────────────────────
+let localStream;
+let localPC, remotePC;       // Two peers in the same page (loopback demo)
+let sendChannel, receiveChannel;
+
+const localVideo   = document.getElementById('localVideo');
+const remoteVideo  = document.getElementById('remoteVideo');
+const startBtn     = document.getElementById('startBtn');
+const connectBtn   = document.getElementById('connectBtn');
+const hangupBtn    = document.getElementById('hangupBtn');
+const msgInput     = document.getElementById('msgInput');
+const sendBtn      = document.getElementById('sendBtn');
+const messagesDiv  = document.getElementById('messages');
+const statusEl     = document.getElementById('status');
+
+// ─── ICE Config ───────────────────────────────────────────────────────────────
+const iceConfig = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+function setStatus(msg) { statusEl.textContent = msg; }
+
+function log(text, type = 'system') {
+    const div = document.createElement('div');
+    div.className = `msg ${type}`;
+    div.textContent = `[${new Date().toLocaleTimeString()}] ${text}`;
+    messagesDiv.appendChild(div);
+    messagesDiv.scrollTop = messagesDiv.scrollHeight;
+}
+
+// ─── 1. Start Camera ──────────────────────────────────────────────────────────
+startBtn.addEventListener('click', async () => {
+    try {
+        localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+        localVideo.srcObject = localStream;
+        setStatus('Camera ready — click "Connect" to start the WebRTC loopback');
+        startBtn.disabled   = true;
+        connectBtn.disabled = false;
+        log('Local camera/mic acquired.');
+    } catch (err) {
+        setStatus(`❌ Camera error: ${err.message}`);
+    }
+});
+
+// ─── 2. Connect (Loopback) ────────────────────────────────────────────────────
+connectBtn.addEventListener('click', async () => {
+    connectBtn.disabled = true;
+    hangupBtn.disabled  = false;
+
+    // Create two peer connections
+    localPC  = new RTCPeerConnection(iceConfig);
+    remotePC = new RTCPeerConnection(iceConfig);
+
+    // ── Data Channel (created on localPC) ──
+    sendChannel = localPC.createDataChannel('chat');
+    setupSendChannel(sendChannel);
+
+    remotePC.ondatachannel = (e) => {
+        receiveChannel = e.channel;
+        setupReceiveChannel(receiveChannel);
+    };
+
+    // ── Wire up ICE candidates ──
+    localPC.onicecandidate  = (e) => e.candidate && remotePC.addIceCandidate(e.candidate);
+    remotePC.onicecandidate = (e) => e.candidate && localPC.addIceCandidate(e.candidate);
+
+    // ── Add local tracks to localPC ──
+    localStream.getTracks().forEach(track => localPC.addTrack(track, localStream));
+
+    // ── Receive remote stream on remotePC ──
+    remotePC.ontrack = (e) => {
+        if (remoteVideo.srcObject !== e.streams[0]) {
+            remoteVideo.srcObject = e.streams[0];
+            log('Remote stream attached to video element.');
+        }
+    };
+
+    // ── Signalling (in-page, no server needed) ──
+    try {
+        const offer  = await localPC.createOffer();
+        await localPC.setLocalDescription(offer);
+        await remotePC.setRemoteDescription(offer);
+
+        const answer = await remotePC.createAnswer();
+        await remotePC.setLocalDescription(answer);
+        await localPC.setRemoteDescription(answer);
+
+        setStatus('✅ WebRTC connected — loopback active');
+        log('Offer/Answer exchange complete. Connection established.');
+    } catch (err) {
+        setStatus(`❌ Signalling error: ${err.message}`);
+    }
+});
+
+// ─── 3. Data Channel Setup ────────────────────────────────────────────────────
+function setupSendChannel(channel) {
+    channel.onopen  = () => {
+        log('Data channel open — you can now send messages.');
+        setStatus('✅ Connected + Data Channel open');
+        msgInput.disabled = false;
+        sendBtn.disabled  = false;
+    };
+    channel.onclose = () => log('Send channel closed.');
+    channel.onerror = (e) => log(`Send channel error: ${e.message}`, 'system');
+}
+
+function setupReceiveChannel(channel) {
+    channel.onmessage = (e) => log(`Remote: ${e.data}`, 'recv');
+    channel.onopen    = () => log('Receive channel open.');
+    channel.onclose   = () => log('Receive channel closed.');
+}
+
+// ─── 4. Send Message ──────────────────────────────────────────────────────────
+sendBtn.addEventListener('click', sendMessage);
+msgInput.addEventListener('keydown', (e) => e.key === 'Enter' && sendMessage());
+
+function sendMessage() {
+    const text = msgInput.value.trim();
+    if (!text || !sendChannel || sendChannel.readyState !== 'open') return;
+    sendChannel.send(text);
+    log(`You: ${text}`, 'sent');
+    msgInput.value = '';
+}
+
+// ─── 5. Hang Up ───────────────────────────────────────────────────────────────
+hangupBtn.addEventListener('click', hangup);
+
+function hangup() {
+    sendChannel?.close();
+    receiveChannel?.close();
+    localPC?.close();
+    remotePC?.close();
+    localStream?.getTracks().forEach(t => t.stop());
+
+    localVideo.srcObject  = null;
+    remoteVideo.srcObject = null;
+
+    localPC = remotePC = localStream = null;
+    sendChannel = receiveChannel = null;
+
+    startBtn.disabled   = false;
+    connectBtn.disabled = true;
+    hangupBtn.disabled  = true;
+    msgInput.disabled   = true;
+    sendBtn.disabled    = true;
+
+    setStatus('Call ended — click "Start Camera" to restart');
+    log('Hang up complete. All connections closed.');
+}
+</script>
 </body>
 </html>
